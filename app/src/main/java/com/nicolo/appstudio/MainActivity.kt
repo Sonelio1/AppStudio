@@ -3,11 +3,13 @@ package com.nicolo.appstudio
 import android.Manifest
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -40,10 +42,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -81,6 +85,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.nicolo.appstudio.ui.theme.AppStudioTheme
@@ -88,6 +94,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
 import java.time.LocalDate
@@ -103,12 +110,21 @@ private val STUDIED_DAYS_KEY = stringSetPreferencesKey("studied_days")
 private val STUDY_VIDEO_IDS_KEY = stringSetPreferencesKey("study_video_ids")
 private val RESET_STUDIED_DAYS_KEY = booleanPreferencesKey("has_reset_studied_days_for_videos")
 private val DAY_DESCRIPTIONS_KEY = stringPreferencesKey("day_descriptions")
+private val CUSTOM_VIDEOS_KEY = stringPreferencesKey("custom_videos_by_date")
 
 data class CameraVideo(
     val id: Long,
     val uri: Uri,
     val date: LocalDate,
     val displayName: String
+)
+
+data class DayVideoItem(
+    val id: String,
+    val uri: Uri,
+    val date: LocalDate,
+    val displayName: String,
+    val isCustom: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -139,14 +155,25 @@ class MainActivity : ComponentActivity() {
                     }
                 }.collectAsState(initial = emptyMap())
 
+                val customVideosMap by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY])
+                    }
+                }.collectAsState(initial = emptyMap())
+
                 var cameraVideos by remember { mutableStateOf<List<CameraVideo>>(emptyList()) }
                 var isLoadingVideos by remember { mutableStateOf(true) }
 
-                val studyVideoDates = remember(cameraVideos, studyVideoIds) {
-                    cameraVideos
+                val studyVideoDates = remember(cameraVideos, customVideosMap, studyVideoIds) {
+                    val cameraDates = cameraVideos
                         .filter { studyVideoIds.contains(it.id.toString()) }
                         .map { it.date.toString() }
-                        .toSet()
+
+                    val customDates = customVideosMap.filter { (_, uris) ->
+                        uris.any { uriStr -> studyVideoIds.contains(uriStr) }
+                    }.keys
+
+                    (cameraDates + customDates).toSet()
                 }
 
                 // One-time reset of studied_days set to clear days previously auto-saved by videos
@@ -217,6 +244,7 @@ class MainActivity : ComponentActivity() {
                         studyVideoIds = studyVideoIds,
                         dayDescriptions = dayDescriptions,
                         cameraVideos = cameraVideos,
+                        customVideosMap = customVideosMap,
                         isLoadingVideos = isLoadingVideos,
                         onToggleDay = { date ->
                             coroutineScope.launch {
@@ -256,6 +284,42 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
+                        onAddVideo = { date, uriString ->
+                            coroutineScope.launch {
+                                context.dataStore.edit { preferences ->
+                                    val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
+                                    val dateStr = date.toString()
+                                    val currentList = currentMap[dateStr]?.toMutableList() ?: mutableListOf()
+                                    if (!currentList.contains(uriString)) {
+                                        currentList.add(uriString)
+                                        currentMap[dateStr] = currentList
+                                        preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
+                                    }
+                                }
+                            }
+                        },
+                        onRemoveVideo = { date, uriString ->
+                            coroutineScope.launch {
+                                context.dataStore.edit { preferences ->
+                                    val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
+                                    val dateStr = date.toString()
+                                    val currentList = currentMap[dateStr]?.toMutableList()
+                                    if (currentList != null) {
+                                        currentList.remove(uriString)
+                                        if (currentList.isEmpty()) {
+                                            currentMap.remove(dateStr)
+                                        } else {
+                                            currentMap[dateStr] = currentList
+                                        }
+                                        preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
+                                    }
+                                    val currentStudyIds = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
+                                    if (currentStudyIds.contains(uriString)) {
+                                        preferences[STUDY_VIDEO_IDS_KEY] = currentStudyIds - uriString
+                                    }
+                                }
+                            }
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -290,6 +354,104 @@ private fun jsonToMap(jsonStr: String?): Map<String, String> {
     } catch (_: Exception) {
     }
     return map
+}
+
+private fun customVideosMapToJson(map: Map<String, List<String>>): String {
+    val json = JSONObject()
+    map.forEach { (k, v) ->
+        if (v.isNotEmpty()) {
+            val arr = JSONArray()
+            v.forEach { arr.put(it) }
+            json.put(k, arr)
+        }
+    }
+    return json.toString()
+}
+
+private fun jsonToCustomVideosMap(jsonStr: String?): Map<String, List<String>> {
+    if (jsonStr.isNullOrBlank()) return emptyMap()
+    val map = mutableMapOf<String, List<String>>()
+    try {
+        val json = JSONObject(jsonStr)
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val arr = json.optJSONArray(key)
+            if (arr != null) {
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val uriStr = arr.optString(i, "")
+                    if (uriStr.isNotBlank() && !list.contains(uriStr)) {
+                        list.add(uriStr)
+                    }
+                }
+                if (list.isNotEmpty()) {
+                    map[key] = list
+                }
+            }
+        }
+    } catch (_: Exception) {
+    }
+    return map
+}
+
+private fun getUriDisplayName(context: Context, uri: Uri): String {
+    try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    val name = cursor.getString(idx)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        }
+    } catch (_: Exception) {
+    }
+
+    try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    val name = cursor.getString(idx)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        }
+    } catch (_: Exception) {
+    }
+
+    val lastSegment = uri.lastPathSegment
+    if (!lastSegment.isNullOrBlank()) {
+        val cut = lastSegment.lastIndexOf('/')
+        val name = if (cut != -1) lastSegment.substring(cut + 1) else lastSegment
+        if (name.isNotBlank()) return name
+    }
+
+    return "Video"
+}
+
+private fun isUriAccessible(context: Context, uri: Uri): Boolean {
+    return try {
+        context.contentResolver.openAssetFileDescriptor(uri, "r")?.use {
+            true
+        } ?: false
+    } catch (_: Exception) {
+        false
+    }
 }
 
 private suspend fun refreshCameraVideos(context: Context): List<CameraVideo> {
@@ -391,10 +553,13 @@ fun CalendarScreen(
     studyVideoIds: Set<String>,
     dayDescriptions: Map<String, String>,
     cameraVideos: List<CameraVideo>,
+    customVideosMap: Map<String, List<String>>,
     isLoadingVideos: Boolean,
     onToggleDay: (LocalDate) -> Unit,
     onToggleStudyVideo: (String, Boolean) -> Unit,
     onSaveDescription: (LocalDate, String) -> Unit,
+    onAddVideo: (LocalDate, String) -> Unit,
+    onRemoveVideo: (LocalDate, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var currentMonth by remember { mutableStateOf(YearMonth.now()) }
@@ -509,12 +674,35 @@ fun CalendarScreen(
     }
 
     selectedDate?.let { date ->
+        val context = LocalContext.current
         val dateStr = date.toString()
         val hasStudyVideo = studyVideoDates.contains(dateStr)
         val isStudiedSwitchOn = studiedDays.contains(dateStr)
         val description = dayDescriptions[dateStr] ?: ""
-        val dayVideos = remember(cameraVideos, date) {
-            cameraVideos.filter { it.date == date }
+        val dayVideos = remember(cameraVideos, customVideosMap, date) {
+            val cameraItems = cameraVideos
+                .filter { it.date == date }
+                .map {
+                    DayVideoItem(
+                        id = it.id.toString(),
+                        uri = it.uri,
+                        date = it.date,
+                        displayName = it.displayName,
+                        isCustom = false
+                    )
+                }
+            val customUris = customVideosMap[dateStr] ?: emptyList()
+            val customItems = customUris.map { uriStr ->
+                val uri = Uri.parse(uriStr)
+                DayVideoItem(
+                    id = uriStr,
+                    uri = uri,
+                    date = date,
+                    displayName = getUriDisplayName(context, uri),
+                    isCustom = true
+                )
+            }
+            cameraItems + customItems
         }
 
         DayDetailBottomSheet(
@@ -528,6 +716,8 @@ fun CalendarScreen(
             onToggleStudied = onToggleDay,
             onToggleStudyVideo = onToggleStudyVideo,
             onSaveDescription = onSaveDescription,
+            onAddVideo = onAddVideo,
+            onRemoveVideo = onRemoveVideo,
             onDismiss = { selectedDate = null }
         )
     }
@@ -603,16 +793,32 @@ fun DayDetailBottomSheet(
     date: LocalDate,
     isStudiedSwitchOn: Boolean,
     hasStudyVideo: Boolean,
-    videos: List<CameraVideo>,
+    videos: List<DayVideoItem>,
     isLoadingVideos: Boolean,
     studyVideoIds: Set<String>,
     description: String,
     onToggleStudied: (LocalDate) -> Unit,
     onToggleStudyVideo: (String, Boolean) -> Unit,
     onSaveDescription: (LocalDate, String) -> Unit,
+    onAddVideo: (LocalDate, String) -> Unit,
+    onRemoveVideo: (LocalDate, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
+
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(uri, takeFlags)
+            } catch (_: Exception) {
+            }
+            onAddVideo(date, uri.toString())
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -684,14 +890,27 @@ fun DayDetailBottomSheet(
             )
 
             // Videos section
-            Text(
-                text = "Videos (${videos.size})",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Videos (${videos.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                OutlinedButton(
+                    onClick = {
+                        videoPickerLauncher.launch(arrayOf("video/*"))
+                    }
+                ) {
+                    Text("Add video")
+                }
+            }
 
-            if (isLoadingVideos) {
+            if (isLoadingVideos && videos.isEmpty()) {
                 Text(
                     text = "Loading videos...",
                     style = MaterialTheme.typography.bodyMedium,
@@ -705,13 +924,16 @@ fun DayDetailBottomSheet(
                 )
             } else {
                 videos.forEach { video ->
-                    val isStudy = studyVideoIds.contains(video.id.toString())
+                    val isStudy = studyVideoIds.contains(video.id)
                     VideoPlayerItem(
                         video = video,
                         isStudyVideo = isStudy,
                         onToggleStudyVideo = { checked ->
-                            onToggleStudyVideo(video.id.toString(), checked)
-                        }
+                            onToggleStudyVideo(video.id, checked)
+                        },
+                        onRemoveVideo = if (video.isCustom) {
+                            { onRemoveVideo(date, video.id) }
+                        } else null
                     )
                 }
             }
@@ -721,22 +943,42 @@ fun DayDetailBottomSheet(
 
 @Composable
 fun VideoPlayerItem(
-    video: CameraVideo,
+    video: DayVideoItem,
     isStudyVideo: Boolean,
     onToggleStudyVideo: (Boolean) -> Unit,
+    onRemoveVideo: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val exoPlayer = remember(context, video.uri) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(video.uri))
-            prepare()
+    val isAccessible = remember(context, video.uri) {
+        isUriAccessible(context, video.uri)
+    }
+    var isPlaybackError by remember { mutableStateOf(false) }
+
+    val exoPlayer = remember(context, video.uri, isAccessible) {
+        if (isAccessible) {
+            try {
+                ExoPlayer.Builder(context).build().apply {
+                    addListener(object : Player.Listener {
+                        override fun onPlayerError(error: PlaybackException) {
+                            isPlaybackError = true
+                        }
+                    })
+                    setMediaItem(MediaItem.fromUri(video.uri))
+                    prepare()
+                }
+            } catch (_: Exception) {
+                isPlaybackError = true
+                null
+            }
+        } else {
+            null
         }
     }
 
     DisposableEffect(exoPlayer) {
         onDispose {
-            exoPlayer.release()
+            exoPlayer?.release()
         }
     }
 
@@ -753,35 +995,67 @@ fun VideoPlayerItem(
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(bottom = 8.dp)
         )
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = true
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp)
-                .clip(RoundedCornerShape(8.dp))
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+
+        if (!isAccessible || isPlaybackError || exoPlayer == null) {
             Text(
-                text = "Counts as study",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
+                text = "Video not available",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 8.dp)
             )
-            Switch(
-                checked = isStudyVideo,
-                onCheckedChange = onToggleStudyVideo
+            if (onRemoveVideo != null) {
+                TextButton(
+                    onClick = onRemoveVideo,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text(
+                        text = "Remove from this day",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        } else {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = true
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(8.dp))
             )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Counts as study",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Switch(
+                    checked = isStudyVideo,
+                    onCheckedChange = onToggleStudyVideo
+                )
+            }
+            if (onRemoveVideo != null) {
+                TextButton(
+                    onClick = onRemoveVideo,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text(
+                        text = "Remove from this day",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
     }
 }
@@ -845,10 +1119,13 @@ fun CalendarPreview() {
             studyVideoIds = emptySet(),
             dayDescriptions = emptyMap(),
             cameraVideos = emptyList(),
+            customVideosMap = emptyMap(),
             isLoadingVideos = false,
             onToggleDay = {},
             onToggleStudyVideo = { _, _ -> },
-            onSaveDescription = { _, _ -> }
+            onSaveDescription = { _, _ -> },
+            onAddVideo = { _, _ -> },
+            onRemoveVideo = { _, _ -> }
         )
     }
 }
@@ -866,10 +1143,13 @@ fun CalendarDarkPreview() {
             studyVideoIds = emptySet(),
             dayDescriptions = emptyMap(),
             cameraVideos = emptyList(),
+            customVideosMap = emptyMap(),
             isLoadingVideos = false,
             onToggleDay = {},
             onToggleStudyVideo = { _, _ -> },
-            onSaveDescription = { _, _ -> }
+            onSaveDescription = { _, _ -> },
+            onAddVideo = { _, _ -> },
+            onRemoveVideo = { _, _ -> }
         )
     }
 }
