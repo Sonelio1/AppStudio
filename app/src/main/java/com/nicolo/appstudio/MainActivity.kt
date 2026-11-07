@@ -182,8 +182,10 @@ class MainActivity : ComponentActivity() {
                 ) { innerPadding ->
                     when (currentTab) {
                         AppTab.Home -> {
-                            PlaceholderScreen(
-                                title = "Home",
+                            HomeScreen(
+                                studiedDays = studiedDays,
+                                studyVideoDates = studyVideoDates,
+                                onNavigateToCalendar = { currentTab = AppTab.Calendar },
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }

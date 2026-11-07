@@ -164,8 +164,7 @@ fun CalendarScreen(
                 val date = currentMonth.atDay(day)
                 val dateStr = date.toString()
                 val isToday = (date == today)
-                val hasStudyVideo = studyVideoDates.contains(dateStr)
-                val isStudied = hasStudyVideo || studiedDays.contains(dateStr)
+                val isStudied = isDayStudied(date, studiedDays, studyVideoDates)
                 val hasDescription = dayDescriptions[dateStr]?.isNotBlank() == true
 
                 DayCell(
