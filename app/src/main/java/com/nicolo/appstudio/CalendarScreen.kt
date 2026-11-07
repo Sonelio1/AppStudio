@@ -1,7 +1,6 @@
 package com.nicolo.appstudio
 
 import android.content.res.Configuration
-import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -185,29 +184,7 @@ fun CalendarScreen(
         val isStudiedSwitchOn = studiedDays.contains(dateStr)
         val description = dayDescriptions[dateStr] ?: ""
         val dayVideos = remember(cameraVideos, customVideosMap, date) {
-            val cameraItems = cameraVideos
-                .filter { it.date == date }
-                .map {
-                    DayVideoItem(
-                        id = it.id.toString(),
-                        uri = it.uri,
-                        date = it.date,
-                        displayName = it.displayName,
-                        isCustom = false
-                    )
-                }
-            val customUris = customVideosMap[dateStr] ?: emptyList()
-            val customItems = customUris.map { uriStr ->
-                val uri = Uri.parse(uriStr)
-                DayVideoItem(
-                    id = uriStr,
-                    uri = uri,
-                    date = date,
-                    displayName = getUriDisplayName(context, uri),
-                    isCustom = true
-                )
-            }
-            cameraItems + customItems
+            getVideosForDay(context, date, cameraVideos, customVideosMap)
         }
 
         DayDetailBottomSheet(

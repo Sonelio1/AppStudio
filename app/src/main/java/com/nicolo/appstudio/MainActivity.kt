@@ -8,7 +8,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -16,12 +15,10 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -155,6 +152,85 @@ class MainActivity : ComponentActivity() {
 
                 var currentTab by rememberSaveable { mutableStateOf(AppTab.Home) }
 
+                val onToggleDay: (java.time.LocalDate) -> Unit = { date ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = preferences[STUDIED_DAYS_KEY] ?: emptySet()
+                            val dateStr = date.toString()
+                            preferences[STUDIED_DAYS_KEY] = if (current.contains(dateStr)) {
+                                current - dateStr
+                            } else {
+                                current + dateStr
+                            }
+                        }
+                    }
+                }
+
+                val onToggleStudyVideo: (String, Boolean) -> Unit = { videoId, isStudy ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
+                            preferences[STUDY_VIDEO_IDS_KEY] = if (isStudy) {
+                                current + videoId
+                            } else {
+                                current - videoId
+                            }
+                        }
+                    }
+                }
+
+                val onSaveDescription: (java.time.LocalDate, String) -> Unit = { date, text ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val currentMap = jsonToMap(preferences[DAY_DESCRIPTIONS_KEY]).toMutableMap()
+                            if (text.isBlank()) {
+                                currentMap.remove(date.toString())
+                            } else {
+                                currentMap[date.toString()] = text
+                            }
+                            preferences[DAY_DESCRIPTIONS_KEY] = mapToJson(currentMap)
+                        }
+                    }
+                }
+
+                val onAddVideo: (java.time.LocalDate, String) -> Unit = { date, uriString ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
+                            val dateStr = date.toString()
+                            val currentList = currentMap[dateStr]?.toMutableList() ?: mutableListOf()
+                            if (!currentList.contains(uriString)) {
+                                currentList.add(uriString)
+                                currentMap[dateStr] = currentList
+                                preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
+                            }
+                        }
+                    }
+                }
+
+                val onRemoveVideo: (java.time.LocalDate, String) -> Unit = { date, uriString ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
+                            val dateStr = date.toString()
+                            val currentList = currentMap[dateStr]?.toMutableList()
+                            if (currentList != null) {
+                                currentList.remove(uriString)
+                                if (currentList.isEmpty()) {
+                                    currentMap.remove(dateStr)
+                                } else {
+                                    currentMap[dateStr] = currentList
+                                }
+                                preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
+                            }
+                            val currentStudyIds = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
+                            if (currentStudyIds.contains(uriString)) {
+                                preferences[STUDY_VIDEO_IDS_KEY] = currentStudyIds - uriString
+                            }
+                        }
+                    }
+                }
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
@@ -198,86 +274,28 @@ class MainActivity : ComponentActivity() {
                                 cameraVideos = cameraVideos,
                                 customVideosMap = customVideosMap,
                                 isLoadingVideos = isLoadingVideos,
-                                onToggleDay = { date ->
-                                    coroutineScope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            val current = preferences[STUDIED_DAYS_KEY] ?: emptySet()
-                                            val dateStr = date.toString()
-                                            preferences[STUDIED_DAYS_KEY] = if (current.contains(dateStr)) {
-                                                current - dateStr
-                                            } else {
-                                                current + dateStr
-                                            }
-                                        }
-                                    }
-                                },
-                                onToggleStudyVideo = { videoId, isStudy ->
-                                    coroutineScope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            val current = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
-                                            preferences[STUDY_VIDEO_IDS_KEY] = if (isStudy) {
-                                                current + videoId
-                                            } else {
-                                                current - videoId
-                                            }
-                                        }
-                                    }
-                                },
-                                onSaveDescription = { date, text ->
-                                    coroutineScope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            val currentMap = jsonToMap(preferences[DAY_DESCRIPTIONS_KEY]).toMutableMap()
-                                            if (text.isBlank()) {
-                                                currentMap.remove(date.toString())
-                                            } else {
-                                                currentMap[date.toString()] = text
-                                            }
-                                            preferences[DAY_DESCRIPTIONS_KEY] = mapToJson(currentMap)
-                                        }
-                                    }
-                                },
-                                onAddVideo = { date, uriString ->
-                                    coroutineScope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
-                                            val dateStr = date.toString()
-                                            val currentList = currentMap[dateStr]?.toMutableList() ?: mutableListOf()
-                                            if (!currentList.contains(uriString)) {
-                                                currentList.add(uriString)
-                                                currentMap[dateStr] = currentList
-                                                preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
-                                            }
-                                        }
-                                    }
-                                },
-                                onRemoveVideo = { date, uriString ->
-                                    coroutineScope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            val currentMap = jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY]).toMutableMap()
-                                            val dateStr = date.toString()
-                                            val currentList = currentMap[dateStr]?.toMutableList()
-                                            if (currentList != null) {
-                                                currentList.remove(uriString)
-                                                if (currentList.isEmpty()) {
-                                                    currentMap.remove(dateStr)
-                                                } else {
-                                                    currentMap[dateStr] = currentList
-                                                }
-                                                preferences[CUSTOM_VIDEOS_KEY] = customVideosMapToJson(currentMap)
-                                            }
-                                            val currentStudyIds = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
-                                            if (currentStudyIds.contains(uriString)) {
-                                                preferences[STUDY_VIDEO_IDS_KEY] = currentStudyIds - uriString
-                                            }
-                                        }
-                                    }
-                                },
+                                onToggleDay = onToggleDay,
+                                onToggleStudyVideo = onToggleStudyVideo,
+                                onSaveDescription = onSaveDescription,
+                                onAddVideo = onAddVideo,
+                                onRemoveVideo = onRemoveVideo,
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
                         AppTab.Videos -> {
-                            PlaceholderScreen(
-                                title = "Videos",
+                            VideosScreen(
+                                cameraVideos = cameraVideos,
+                                customVideosMap = customVideosMap,
+                                studyVideoDates = studyVideoDates,
+                                studyVideoIds = studyVideoIds,
+                                studiedDays = studiedDays,
+                                dayDescriptions = dayDescriptions,
+                                isLoadingVideos = isLoadingVideos,
+                                onToggleDay = onToggleDay,
+                                onToggleStudyVideo = onToggleStudyVideo,
+                                onSaveDescription = onSaveDescription,
+                                onAddVideo = onAddVideo,
+                                onRemoveVideo = onRemoveVideo,
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
@@ -292,21 +310,4 @@ enum class AppTab {
     Home,
     Calendar,
     Videos
-}
-
-@Composable
-fun PlaceholderScreen(
-    title: String,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-    }
 }

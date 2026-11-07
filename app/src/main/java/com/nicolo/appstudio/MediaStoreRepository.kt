@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 
 fun getUriDisplayName(context: Context, uri: Uri): String {
@@ -70,6 +71,76 @@ fun isUriAccessible(context: Context, uri: Uri): Boolean {
     } catch (_: Exception) {
         false
     }
+}
+
+fun getVideosForDay(
+    context: Context,
+    date: LocalDate,
+    cameraVideos: List<CameraVideo>,
+    customVideosMap: Map<String, List<String>>
+): List<DayVideoItem> {
+    val cameraItems = cameraVideos
+        .filter { it.date == date }
+        .map {
+            DayVideoItem(
+                id = it.id.toString(),
+                uri = it.uri,
+                date = it.date,
+                displayName = it.displayName,
+                isCustom = false
+            )
+        }
+    val dateStr = date.toString()
+    val customUris = customVideosMap[dateStr] ?: emptyList()
+    val customItems = customUris.map { uriStr ->
+        val uri = Uri.parse(uriStr)
+        DayVideoItem(
+            id = uriStr,
+            uri = uri,
+            date = date,
+            displayName = getUriDisplayName(context, uri),
+            isCustom = true
+        )
+    }
+    return cameraItems + customItems
+}
+
+fun getAllVideos(
+    context: Context,
+    cameraVideos: List<CameraVideo>,
+    customVideosMap: Map<String, List<String>>
+): List<DayVideoItem> {
+    val cameraItems = cameraVideos.map {
+        DayVideoItem(
+            id = it.id.toString(),
+            uri = it.uri,
+            date = it.date,
+            displayName = it.displayName,
+            isCustom = false
+        )
+    }
+    val customItems = customVideosMap.flatMap { (dateStr, uris) ->
+        val date = try {
+            LocalDate.parse(dateStr)
+        } catch (_: Exception) {
+            null
+        }
+        if (date != null) {
+            uris.map { uriStr ->
+                val uri = Uri.parse(uriStr)
+                DayVideoItem(
+                    id = uriStr,
+                    uri = uri,
+                    date = date,
+                    displayName = getUriDisplayName(context, uri),
+                    isCustom = true
+                )
+            }
+        } else {
+            emptyList()
+        }
+    }
+    return cameraItems + customItems
 }
 
 suspend fun refreshCameraVideos(context: Context): List<CameraVideo> {
