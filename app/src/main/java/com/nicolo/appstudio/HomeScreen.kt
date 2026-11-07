@@ -1,9 +1,16 @@
 package com.nicolo.appstudio
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,26 +30,40 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.rounded.LocalFireDepartment
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.nicolo.appstudio.ui.theme.AppStudioTheme
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.format.TextStyle
 import java.util.Locale
 
@@ -50,6 +71,15 @@ import java.util.Locale
 fun HomeScreen(
     studiedDays: Set<String>,
     studyVideoDates: Set<String>,
+    exams: List<Exam> = emptyList(),
+    reminderEnabled: Boolean = false,
+    reminderTime: String = "20:00",
+    onToggleReminder: (Boolean) -> Unit = {},
+    onChangeReminderTime: (String) -> Unit = {},
+    onAddExam: (String, LocalDate) -> Unit = { _, _ -> },
+    onUpdateExam: (Exam) -> Unit = {},
+    onDeleteExam: (String) -> Unit = {},
+    onToggleExamDone: (String) -> Unit = {},
     onNavigateToCalendar: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -327,7 +357,232 @@ fun HomeScreen(
                 }
             }
         }
+
+        // Exams Section
+        ExamsSection(
+            exams = exams,
+            today = today,
+            onAddExam = onAddExam,
+            onUpdateExam = onUpdateExam,
+            onDeleteExam = onDeleteExam,
+            onToggleExamDone = onToggleExamDone
+        )
+
+        // Daily Reminder Card
+        DailyReminderCard(
+            reminderEnabled = reminderEnabled,
+            reminderTime = reminderTime,
+            onToggleReminder = onToggleReminder,
+            onChangeReminderTime = onChangeReminderTime
+        )
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DailyReminderCard(
+    reminderEnabled: Boolean,
+    reminderTime: String,
+    onToggleReminder: (Boolean) -> Unit,
+    onChangeReminderTime: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var showTimePicker by remember { mutableStateOf(false) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            onToggleReminder(true)
+        } else {
+            onToggleReminder(false)
+            Toast.makeText(
+                context,
+                "Notification permission disabled. Reminder turned off.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    val localTime = remember(reminderTime) {
+        ReminderScheduler.parseTime(reminderTime)
+    }
+
+    val timeFormatted = remember(localTime) {
+        String.format(Locale.getDefault(), "%02d:%02d", localTime.hour, localTime.minute)
+    }
+
+    val nextScheduledText = remember(reminderTime, reminderEnabled) {
+        if (!reminderEnabled) {
+            "Reminders are turned off"
+        } else {
+            val now = LocalDateTime.now()
+            val targetToday = LocalDateTime.of(now.toLocalDate(), localTime)
+            if (targetToday.isAfter(now)) {
+                "Next reminder: today at $timeFormatted"
+            } else {
+                "Next reminder: tomorrow at $timeFormatted"
+            }
+        }
+    }
+
+    if (showTimePicker) {
+        TimePickerDialog(
+            onDismissRequest = { showTimePicker = false },
+            onTimeSelected = { hour, minute ->
+                val newTimeStr = String.format(Locale.getDefault(), "%02d:%02d", hour, minute)
+                onChangeReminderTime(newTimeStr)
+            },
+            initialHour = localTime.hour,
+            initialMinute = localTime.minute
+        )
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Notifications,
+                        contentDescription = "Daily reminder",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = "Daily reminder",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Switch(
+                    checked = reminderEnabled,
+                    onCheckedChange = { checked ->
+                        if (checked) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val status = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.POST_NOTIFICATIONS
+                                )
+                                if (status == PackageManager.PERMISSION_GRANTED) {
+                                    onToggleReminder(true)
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            } else {
+                                onToggleReminder(true)
+                            }
+                        } else {
+                            onToggleReminder(false)
+                        }
+                    }
+                )
+            }
+
+            // Time selector row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showTimePicker = true },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Schedule,
+                        contentDescription = "Time",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Time",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                ) {
+                    Text(
+                        text = timeFormatted,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = nextScheduledText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TimePickerDialog(
+    onDismissRequest: () -> Unit,
+    onTimeSelected: (Int, Int) -> Unit,
+    initialHour: Int,
+    initialMinute: Int
+) {
+    val timePickerState = rememberTimePickerState(
+        initialHour = initialHour,
+        initialMinute = initialMinute,
+        is24Hour = true
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onTimeSelected(timePickerState.hour, timePickerState.minute)
+                    onDismissRequest()
+                }
+            ) {
+                Text("OK")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismissRequest) {
+                Text("Cancel")
+            }
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                TimePicker(state = timePickerState)
+            }
+        }
+    )
 }
 
 @Preview(showBackground = true)

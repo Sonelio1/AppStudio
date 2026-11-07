@@ -102,4 +102,59 @@ class ExampleUnitTest {
         assertTrue(isDayStudied(date, setOf(dateStr), setOf(dateStr)))
         assertFalse(isDayStudied(date, emptySet(), emptySet()))
     }
+
+    @Test
+    fun calculateDaysLeft_futureDate() {
+        val today = LocalDate.of(2026, 11, 20)
+        val examDate = LocalDate.of(2026, 12, 1)
+
+        val daysLeft = calculateDaysLeft(examDate, today)
+
+        assertEquals(11L, daysLeft)
+        assertEquals("11 days left", formatDaysLeft(examDate, today))
+    }
+
+    @Test
+    fun calculateDaysLeft_tomorrow() {
+        val today = LocalDate.of(2026, 11, 20)
+        val examDate = LocalDate.of(2026, 11, 21)
+
+        val daysLeft = calculateDaysLeft(examDate, today)
+
+        assertEquals(1L, daysLeft)
+        assertEquals("Tomorrow", formatDaysLeft(examDate, today))
+    }
+
+    @Test
+    fun calculateDaysLeft_today() {
+        val today = LocalDate.of(2026, 11, 20)
+        val examDate = LocalDate.of(2026, 11, 20)
+
+        val daysLeft = calculateDaysLeft(examDate, today)
+
+        assertEquals(0L, daysLeft)
+        assertEquals("Today", formatDaysLeft(examDate, today))
+    }
+
+    @Test
+    fun calculateDaysLeft_yesterday() {
+        val today = LocalDate.of(2026, 11, 20)
+        val examDate = LocalDate.of(2026, 11, 19)
+
+        val daysLeft = calculateDaysLeft(examDate, today)
+
+        assertEquals(-1L, daysLeft)
+        assertEquals("Passed 1 day ago", formatDaysLeft(examDate, today))
+    }
+
+    @Test
+    fun calculateDaysLeft_pastDate() {
+        val today = LocalDate.of(2026, 11, 20)
+        val examDate = LocalDate.of(2026, 11, 15)
+
+        val daysLeft = calculateDaysLeft(examDate, today)
+
+        assertEquals(-5L, daysLeft)
+        assertEquals("Passed 5 days ago", formatDaysLeft(examDate, today))
+    }
 }

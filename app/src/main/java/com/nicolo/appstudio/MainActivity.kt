@@ -28,7 +28,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -37,6 +36,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nicolo.appstudio.ui.theme.AppStudioTheme
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
@@ -73,6 +73,24 @@ class MainActivity : ComponentActivity() {
                         jsonToCustomVideosMap(preferences[CUSTOM_VIDEOS_KEY])
                     }
                 }.collectAsState(initial = emptyMap())
+
+                val exams by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        jsonToExams(preferences[EXAMS_KEY])
+                    }
+                }.collectAsState(initial = emptyList())
+
+                val reminderEnabled by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        preferences[REMINDER_ENABLED_KEY] ?: false
+                    }
+                }.collectAsState(initial = false)
+
+                val reminderTime by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        preferences[REMINDER_TIME_KEY] ?: "20:00"
+                    }
+                }.collectAsState(initial = "20:00")
 
                 var cameraVideos by remember { mutableStateOf<List<CameraVideo>>(emptyList()) }
                 var isLoadingVideos by remember { mutableStateOf(true) }
@@ -142,6 +160,13 @@ class MainActivity : ComponentActivity() {
                                     isLoadingVideos = false
                                 }
                             }
+                            coroutineScope.launch {
+                                val isEnabled = context.dataStore.data.first()[REMINDER_ENABLED_KEY] ?: false
+                                if (isEnabled) {
+                                    val time = context.dataStore.data.first()[REMINDER_TIME_KEY] ?: "20:00"
+                                    ReminderScheduler.scheduleNextReminder(context, time)
+                                }
+                            }
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
@@ -151,6 +176,32 @@ class MainActivity : ComponentActivity() {
                 }
 
                 var currentTab by rememberSaveable { mutableStateOf(AppTab.Home) }
+
+                val onToggleReminder: (Boolean) -> Unit = { enabled ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            preferences[REMINDER_ENABLED_KEY] = enabled
+                        }
+                        if (enabled) {
+                            val time = context.dataStore.data.first()[REMINDER_TIME_KEY] ?: "20:00"
+                            ReminderScheduler.scheduleNextReminder(context, time)
+                        } else {
+                            ReminderScheduler.cancelReminder(context)
+                        }
+                    }
+                }
+
+                val onChangeReminderTime: (String) -> Unit = { newTime ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            preferences[REMINDER_TIME_KEY] = newTime
+                        }
+                        val isEnabled = context.dataStore.data.first()[REMINDER_ENABLED_KEY] ?: false
+                        if (isEnabled) {
+                            ReminderScheduler.scheduleNextReminder(context, newTime)
+                        }
+                    }
+                }
 
                 val onToggleDay: (java.time.LocalDate) -> Unit = { date ->
                     coroutineScope.launch {
@@ -231,6 +282,48 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val onAddExam: (String, java.time.LocalDate) -> Unit = { name, date ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = jsonToExams(preferences[EXAMS_KEY])
+                            val updated = current + Exam(name = name, date = date)
+                            preferences[EXAMS_KEY] = examsToJson(updated)
+                        }
+                    }
+                }
+
+                val onUpdateExam: (Exam) -> Unit = { updatedExam ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = jsonToExams(preferences[EXAMS_KEY])
+                            val updated = current.map { if (it.id == updatedExam.id) updatedExam else it }
+                            preferences[EXAMS_KEY] = examsToJson(updated)
+                        }
+                    }
+                }
+
+                val onDeleteExam: (String) -> Unit = { examId ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = jsonToExams(preferences[EXAMS_KEY])
+                            val updated = current.filterNot { it.id == examId }
+                            preferences[EXAMS_KEY] = examsToJson(updated)
+                        }
+                    }
+                }
+
+                val onToggleExamDone: (String) -> Unit = { examId ->
+                    coroutineScope.launch {
+                        context.dataStore.edit { preferences ->
+                            val current = jsonToExams(preferences[EXAMS_KEY])
+                            val updated = current.map {
+                                if (it.id == examId) it.copy(done = !it.done) else it
+                            }
+                            preferences[EXAMS_KEY] = examsToJson(updated)
+                        }
+                    }
+                }
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
@@ -261,6 +354,15 @@ class MainActivity : ComponentActivity() {
                             HomeScreen(
                                 studiedDays = studiedDays,
                                 studyVideoDates = studyVideoDates,
+                                exams = exams,
+                                reminderEnabled = reminderEnabled,
+                                reminderTime = reminderTime,
+                                onToggleReminder = onToggleReminder,
+                                onChangeReminderTime = onChangeReminderTime,
+                                onAddExam = onAddExam,
+                                onUpdateExam = onUpdateExam,
+                                onDeleteExam = onDeleteExam,
+                                onToggleExamDone = onToggleExamDone,
                                 onNavigateToCalendar = { currentTab = AppTab.Calendar },
                                 modifier = Modifier.padding(innerPadding)
                             )

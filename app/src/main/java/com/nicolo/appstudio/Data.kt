@@ -18,6 +18,16 @@ val STUDY_VIDEO_IDS_KEY = stringSetPreferencesKey("study_video_ids")
 val RESET_STUDIED_DAYS_KEY = booleanPreferencesKey("has_reset_studied_days_for_videos")
 val DAY_DESCRIPTIONS_KEY = stringPreferencesKey("day_descriptions")
 val CUSTOM_VIDEOS_KEY = stringPreferencesKey("custom_videos_by_date")
+val EXAMS_KEY = stringPreferencesKey("exams_list")
+val REMINDER_ENABLED_KEY = booleanPreferencesKey("reminder_enabled")
+val REMINDER_TIME_KEY = stringPreferencesKey("reminder_time")
+
+data class Exam(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    val date: LocalDate,
+    val done: Boolean = false
+)
 
 data class CameraVideo(
     val id: Long,
@@ -99,4 +109,38 @@ fun jsonToCustomVideosMap(jsonStr: String?): Map<String, List<String>> {
     } catch (_: Exception) {
     }
     return map
+}
+
+fun examsToJson(exams: List<Exam>): String {
+    val array = JSONArray()
+    exams.forEach { exam ->
+        val obj = JSONObject()
+        obj.put("id", exam.id)
+        obj.put("name", exam.name)
+        obj.put("date", exam.date.toString())
+        obj.put("done", exam.done)
+        array.put(obj)
+    }
+    return array.toString()
+}
+
+fun jsonToExams(jsonStr: String?): List<Exam> {
+    if (jsonStr.isNullOrBlank()) return emptyList()
+    val list = mutableListOf<Exam>()
+    try {
+        val array = JSONArray(jsonStr)
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val id = obj.optString("id", "")
+            val name = obj.optString("name", "")
+            val dateStr = obj.optString("date", "")
+            val done = obj.optBoolean("done", false)
+            if (id.isNotBlank() && name.isNotBlank() && dateStr.isNotBlank()) {
+                val date = LocalDate.parse(dateStr)
+                list.add(Exam(id = id, name = name, date = date, done = done))
+            }
+        }
+    } catch (_: Exception) {
+    }
+    return list
 }
