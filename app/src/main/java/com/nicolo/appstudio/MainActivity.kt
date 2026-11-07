@@ -1,11 +1,16 @@
 package com.nicolo.appstudio
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,6 +35,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,16 +57,24 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nicolo.appstudio.ui.theme.AppStudioTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.time.temporal.WeekFields
@@ -76,11 +91,57 @@ class MainActivity : ComponentActivity() {
             AppStudioTheme {
                 val context = LocalContext.current
                 val coroutineScope = rememberCoroutineScope()
+                val lifecycleOwner = LocalLifecycleOwner.current
+
                 val studiedDays by remember(context) {
                     context.dataStore.data.map { preferences ->
                         preferences[STUDIED_DAYS_KEY] ?: emptySet()
                     }
                 }.collectAsState(initial = emptySet())
+
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { isGranted ->
+                    if (isGranted) {
+                        coroutineScope.launch {
+                            refreshCameraVideos(context)
+                        }
+                    }
+                }
+
+                // Request permission and scan on first launch
+                LaunchedEffect(Unit) {
+                    if (ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.READ_MEDIA_VIDEO
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        refreshCameraVideos(context)
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO)
+                    }
+                }
+
+                // Refresh every time the app is opened / brought to foreground
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_START) {
+                            if (ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.READ_MEDIA_VIDEO
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                coroutineScope.launch {
+                                    refreshCameraVideos(context)
+                                }
+                            }
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                    }
+                }
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     CalendarScreen(
@@ -104,6 +165,94 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+private suspend fun refreshCameraVideos(context: Context) {
+    if (ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_MEDIA_VIDEO
+        ) != PackageManager.PERMISSION_GRANTED
+    ) {
+        return
+    }
+
+    val videoDates = withContext(Dispatchers.IO) {
+        getCameraVideoDates(context)
+    }
+
+    if (videoDates.isNotEmpty()) {
+        context.dataStore.edit { preferences ->
+            val current = preferences[STUDIED_DAYS_KEY] ?: emptySet()
+            preferences[STUDIED_DAYS_KEY] = current + videoDates
+        }
+    }
+}
+
+private fun getCameraVideoDates(context: Context): Set<String> {
+    val dates = mutableSetOf<String>()
+    val projection = arrayOf(
+        MediaStore.Video.Media._ID,
+        MediaStore.Video.Media.DATE_TAKEN,
+        MediaStore.Video.Media.DATE_ADDED,
+        MediaStore.Video.Media.RELATIVE_PATH,
+        MediaStore.Video.Media.DATA,
+        MediaStore.Video.Media.BUCKET_DISPLAY_NAME
+    )
+
+    val selection = "(${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Video.Media.DATA} LIKE ? OR ${MediaStore.Video.Media.BUCKET_DISPLAY_NAME} = ?)"
+    val selectionArgs = arrayOf("%DCIM/Camera%", "%/DCIM/Camera/%", "Camera")
+
+    try {
+        context.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            null
+        )?.use { cursor ->
+            val dateTakenCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_TAKEN)
+            val dateAddedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
+            val relativePathCol = cursor.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
+            val dataCol = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
+            val bucketCol = cursor.getColumnIndex(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+
+            val zoneId = ZoneId.systemDefault()
+
+            while (cursor.moveToNext()) {
+                val relativePath = if (relativePathCol >= 0) cursor.getString(relativePathCol) ?: "" else ""
+                val data = if (dataCol >= 0) cursor.getString(dataCol) ?: "" else ""
+                val bucket = if (bucketCol >= 0) cursor.getString(bucketCol) ?: "" else ""
+
+                val isCameraVideo = relativePath.contains("DCIM/Camera", ignoreCase = true) ||
+                        data.contains("/DCIM/Camera/", ignoreCase = true) ||
+                        bucket.equals("Camera", ignoreCase = true)
+
+                if (isCameraVideo) {
+                    val dateTakenMs = if (dateTakenCol >= 0) cursor.getLong(dateTakenCol) else 0L
+                    val dateAddedSec = if (dateAddedCol >= 0) cursor.getLong(dateAddedCol) else 0L
+
+                    val epochMillis = when {
+                        dateTakenMs > 0L -> dateTakenMs
+                        dateAddedSec > 0L -> dateAddedSec * 1000L
+                        else -> 0L
+                    }
+
+                    if (epochMillis > 0L) {
+                        val localDate = Instant.ofEpochMilli(epochMillis)
+                            .atZone(zoneId)
+                            .toLocalDate()
+                        dates.add(localDate.toString())
+                    }
+                }
+            }
+        }
+    } catch (_: SecurityException) {
+        // Ignored if permission is revoked
+    } catch (_: Exception) {
+        // Ignored for query issues
+    }
+
+    return dates
 }
 
 @Composable
