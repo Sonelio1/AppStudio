@@ -1,9 +1,11 @@
 package com.nicolo.appstudio
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
@@ -25,15 +27,24 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,20 +68,26 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.nicolo.appstudio.ui.theme.AppStudioTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
@@ -82,6 +99,14 @@ import java.util.Locale
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "study_preferences")
 private val STUDIED_DAYS_KEY = stringSetPreferencesKey("studied_days")
+private val DAY_DESCRIPTIONS_KEY = stringPreferencesKey("day_descriptions")
+
+data class CameraVideo(
+    val id: Long,
+    val uri: Uri,
+    val date: LocalDate,
+    val displayName: String
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,12 +124,20 @@ class MainActivity : ComponentActivity() {
                     }
                 }.collectAsState(initial = emptySet())
 
+                val dayDescriptions by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        jsonToMap(preferences[DAY_DESCRIPTIONS_KEY])
+                    }
+                }.collectAsState(initial = emptyMap())
+
+                var cameraVideoDates by remember { mutableStateOf<Set<String>>(emptySet()) }
+
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { isGranted ->
                     if (isGranted) {
                         coroutineScope.launch {
-                            refreshCameraVideos(context)
+                            cameraVideoDates = refreshCameraVideos(context)
                         }
                     }
                 }
@@ -116,7 +149,7 @@ class MainActivity : ComponentActivity() {
                             Manifest.permission.READ_MEDIA_VIDEO
                         ) == PackageManager.PERMISSION_GRANTED
                     ) {
-                        refreshCameraVideos(context)
+                        cameraVideoDates = refreshCameraVideos(context)
                     } else {
                         permissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO)
                     }
@@ -132,7 +165,7 @@ class MainActivity : ComponentActivity() {
                                 ) == PackageManager.PERMISSION_GRANTED
                             ) {
                                 coroutineScope.launch {
-                                    refreshCameraVideos(context)
+                                    cameraVideoDates = refreshCameraVideos(context)
                                 }
                             }
                         }
@@ -146,6 +179,8 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     CalendarScreen(
                         studiedDays = studiedDays,
+                        cameraVideoDates = cameraVideoDates,
+                        dayDescriptions = dayDescriptions,
                         onToggleDay = { date ->
                             coroutineScope.launch {
                                 context.dataStore.edit { preferences ->
@@ -159,6 +194,19 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         },
+                        onSaveDescription = { date, text ->
+                            coroutineScope.launch {
+                                context.dataStore.edit { preferences ->
+                                    val currentMap = jsonToMap(preferences[DAY_DESCRIPTIONS_KEY]).toMutableMap()
+                                    if (text.isBlank()) {
+                                        currentMap.remove(date.toString())
+                                    } else {
+                                        currentMap[date.toString()] = text
+                                    }
+                                    preferences[DAY_DESCRIPTIONS_KEY] = mapToJson(currentMap)
+                                }
+                            }
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -167,18 +215,48 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private suspend fun refreshCameraVideos(context: Context) {
+private fun mapToJson(map: Map<String, String>): String {
+    val json = JSONObject()
+    map.forEach { (k, v) ->
+        if (v.isNotBlank()) {
+            json.put(k, v)
+        }
+    }
+    return json.toString()
+}
+
+private fun jsonToMap(jsonStr: String?): Map<String, String> {
+    if (jsonStr.isNullOrBlank()) return emptyMap()
+    val map = mutableMapOf<String, String>()
+    try {
+        val json = JSONObject(jsonStr)
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = json.optString(key, "")
+            if (value.isNotBlank()) {
+                map[key] = value
+            }
+        }
+    } catch (_: Exception) {
+    }
+    return map
+}
+
+private suspend fun refreshCameraVideos(context: Context): Set<String> {
     if (ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.READ_MEDIA_VIDEO
         ) != PackageManager.PERMISSION_GRANTED
     ) {
-        return
+        return emptySet()
     }
 
-    val videoDates = withContext(Dispatchers.IO) {
-        getCameraVideoDates(context)
+    val videos = withContext(Dispatchers.IO) {
+        getCameraVideos(context)
     }
+
+    val videoDates = videos.map { it.date.toString() }.toSet()
 
     if (videoDates.isNotEmpty()) {
         context.dataStore.edit { preferences ->
@@ -186,12 +264,15 @@ private suspend fun refreshCameraVideos(context: Context) {
             preferences[STUDIED_DAYS_KEY] = current + videoDates
         }
     }
+
+    return videoDates
 }
 
-private fun getCameraVideoDates(context: Context): Set<String> {
-    val dates = mutableSetOf<String>()
+private fun getCameraVideos(context: Context): List<CameraVideo> {
+    val videos = mutableListOf<CameraVideo>()
     val projection = arrayOf(
         MediaStore.Video.Media._ID,
+        MediaStore.Video.Media.DISPLAY_NAME,
         MediaStore.Video.Media.DATE_TAKEN,
         MediaStore.Video.Media.DATE_ADDED,
         MediaStore.Video.Media.RELATIVE_PATH,
@@ -208,8 +289,10 @@ private fun getCameraVideoDates(context: Context): Set<String> {
             projection,
             selection,
             selectionArgs,
-            null
+            "${MediaStore.Video.Media.DATE_TAKEN} DESC"
         )?.use { cursor ->
+            val idCol = cursor.getColumnIndex(MediaStore.Video.Media._ID)
+            val nameCol = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
             val dateTakenCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_TAKEN)
             val dateAddedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
             val relativePathCol = cursor.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
@@ -241,7 +324,15 @@ private fun getCameraVideoDates(context: Context): Set<String> {
                         val localDate = Instant.ofEpochMilli(epochMillis)
                             .atZone(zoneId)
                             .toLocalDate()
-                        dates.add(localDate.toString())
+
+                        val id = if (idCol >= 0) cursor.getLong(idCol) else 0L
+                        val name = if (nameCol >= 0) cursor.getString(nameCol) ?: "Video_$id" else "Video_$id"
+                        val contentUri = ContentUris.withAppendedId(
+                            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                            id
+                        )
+
+                        videos.add(CameraVideo(id, contentUri, localDate, name))
                     }
                 }
             }
@@ -252,16 +343,20 @@ private fun getCameraVideoDates(context: Context): Set<String> {
         // Ignored for query issues
     }
 
-    return dates
+    return videos
 }
 
 @Composable
 fun CalendarScreen(
     studiedDays: Set<String>,
+    cameraVideoDates: Set<String>,
+    dayDescriptions: Map<String, String>,
     onToggleDay: (LocalDate) -> Unit,
+    onSaveDescription: (LocalDate, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var currentMonth by remember { mutableStateOf(YearMonth.now()) }
+    var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     val today = remember { LocalDate.now() }
 
     val monthFormatter = remember {
@@ -354,17 +449,38 @@ fun CalendarScreen(
             items(daysInMonth) { index ->
                 val day = index + 1
                 val date = currentMonth.atDay(day)
+                val dateStr = date.toString()
                 val isToday = (date == today)
-                val isStudied = studiedDays.contains(date.toString())
+                val hasVideo = cameraVideoDates.contains(dateStr)
+                val isStudied = hasVideo || studiedDays.contains(dateStr)
+                val hasDescription = dayDescriptions[dateStr]?.isNotBlank() == true
 
                 DayCell(
                     day = day,
                     isToday = isToday,
                     isStudied = isStudied,
-                    onToggle = { onToggleDay(date) }
+                    hasDescription = hasDescription,
+                    onClick = { selectedDate = date }
                 )
             }
         }
+    }
+
+    selectedDate?.let { date ->
+        val dateStr = date.toString()
+        val hasVideo = cameraVideoDates.contains(dateStr)
+        val isStudiedSwitchOn = studiedDays.contains(dateStr)
+        val description = dayDescriptions[dateStr] ?: ""
+
+        DayDetailBottomSheet(
+            date = date,
+            isStudiedSwitchOn = isStudiedSwitchOn,
+            hasVideo = hasVideo,
+            description = description,
+            onToggleStudied = onToggleDay,
+            onSaveDescription = onSaveDescription,
+            onDismiss = { selectedDate = null }
+        )
     }
 }
 
@@ -373,7 +489,8 @@ fun DayCell(
     day: Int,
     isToday: Boolean,
     isStudied: Boolean,
-    onToggle: () -> Unit,
+    hasDescription: Boolean,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
@@ -402,7 +519,7 @@ fun DayCell(
                     Modifier
                 }
             )
-            .clickable { onToggle() },
+            .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -414,6 +531,188 @@ fun DayCell(
             },
             fontSize = 15.sp,
             fontWeight = if (isToday) FontWeight.Bold else FontWeight.Medium
+        )
+
+        if (hasDescription) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 5.dp)
+                    .size(5.dp)
+                    .background(
+                        color = if (isStudied) Color.White else MaterialTheme.colorScheme.primary,
+                        shape = CircleShape
+                    )
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DayDetailBottomSheet(
+    date: LocalDate,
+    isStudiedSwitchOn: Boolean,
+    hasVideo: Boolean,
+    description: String,
+    onToggleStudied: (LocalDate) -> Unit,
+    onSaveDescription: (LocalDate, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var videos by remember(date) { mutableStateOf<List<CameraVideo>>(emptyList()) }
+    var isLoadingVideos by remember(date) { mutableStateOf(true) }
+
+    LaunchedEffect(date) {
+        withContext(Dispatchers.IO) {
+            videos = getCameraVideos(context).filter { it.date == date }
+            isLoadingVideos = false
+        }
+    }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            val titleFormatter = remember {
+                DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", Locale.getDefault())
+            }
+            val formattedDate = remember(date) {
+                date.format(titleFormatter)
+                    .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
+            }
+
+            Text(
+                text = formattedDate,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            // Studied switch
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Studied",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (hasVideo) {
+                        Text(
+                            text = "Marked green (video recorded)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                Switch(
+                    checked = isStudiedSwitchOn,
+                    onCheckedChange = { onToggleStudied(date) }
+                )
+            }
+
+            // Description text field
+            var text by remember(description) { mutableStateOf(description) }
+            OutlinedTextField(
+                value = text,
+                onValueChange = { newText ->
+                    text = newText
+                    onSaveDescription(date, newText)
+                },
+                label = { Text("Description") },
+                placeholder = { Text("Enter a description for this day...") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3,
+                maxLines = 5
+            )
+
+            // Videos section
+            Text(
+                text = "Videos (${videos.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            if (isLoadingVideos) {
+                Text(
+                    text = "Loading videos...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (videos.isEmpty()) {
+                Text(
+                    text = "No videos recorded in DCIM/Camera on this day.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                videos.forEach { video ->
+                    VideoPlayerItem(video = video)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun VideoPlayerItem(
+    video: CameraVideo,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val exoPlayer = remember(context, video.uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(video.uri))
+            prepare()
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onDispose {
+            exoPlayer.release()
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(12.dp)
+    ) {
+        Text(
+            text = video.displayName,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    useController = true
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp)
+                .clip(RoundedCornerShape(8.dp))
         )
     }
 }
@@ -473,7 +772,10 @@ fun CalendarPreview() {
                 LocalDate.now().minusDays(1).toString(),
                 LocalDate.now().minusDays(3).toString()
             ),
-            onToggleDay = {}
+            cameraVideoDates = emptySet(),
+            dayDescriptions = emptyMap(),
+            onToggleDay = {},
+            onSaveDescription = { _, _ -> }
         )
     }
 }
@@ -487,7 +789,10 @@ fun CalendarDarkPreview() {
                 LocalDate.now().minusDays(1).toString(),
                 LocalDate.now().minusDays(3).toString()
             ),
-            onToggleDay = {}
+            cameraVideoDates = emptySet(),
+            dayDescriptions = emptyMap(),
+            onToggleDay = {},
+            onSaveDescription = { _, _ -> }
         )
     }
 }
