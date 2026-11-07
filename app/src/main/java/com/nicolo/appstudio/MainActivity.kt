@@ -72,6 +72,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -99,6 +100,8 @@ import java.util.Locale
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "study_preferences")
 private val STUDIED_DAYS_KEY = stringSetPreferencesKey("studied_days")
+private val STUDY_VIDEO_IDS_KEY = stringSetPreferencesKey("study_video_ids")
+private val RESET_STUDIED_DAYS_KEY = booleanPreferencesKey("has_reset_studied_days_for_videos")
 private val DAY_DESCRIPTIONS_KEY = stringPreferencesKey("day_descriptions")
 
 data class CameraVideo(
@@ -124,21 +127,49 @@ class MainActivity : ComponentActivity() {
                     }
                 }.collectAsState(initial = emptySet())
 
+                val studyVideoIds by remember(context) {
+                    context.dataStore.data.map { preferences ->
+                        preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
+                    }
+                }.collectAsState(initial = emptySet())
+
                 val dayDescriptions by remember(context) {
                     context.dataStore.data.map { preferences ->
                         jsonToMap(preferences[DAY_DESCRIPTIONS_KEY])
                     }
                 }.collectAsState(initial = emptyMap())
 
-                var cameraVideoDates by remember { mutableStateOf<Set<String>>(emptySet()) }
+                var cameraVideos by remember { mutableStateOf<List<CameraVideo>>(emptyList()) }
+                var isLoadingVideos by remember { mutableStateOf(true) }
+
+                val studyVideoDates = remember(cameraVideos, studyVideoIds) {
+                    cameraVideos
+                        .filter { studyVideoIds.contains(it.id.toString()) }
+                        .map { it.date.toString() }
+                        .toSet()
+                }
+
+                // One-time reset of studied_days set to clear days previously auto-saved by videos
+                LaunchedEffect(Unit) {
+                    context.dataStore.edit { preferences ->
+                        if (preferences[RESET_STUDIED_DAYS_KEY] != true) {
+                            preferences[STUDIED_DAYS_KEY] = emptySet()
+                            preferences[RESET_STUDIED_DAYS_KEY] = true
+                        }
+                    }
+                }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { isGranted ->
                     if (isGranted) {
                         coroutineScope.launch {
-                            cameraVideoDates = refreshCameraVideos(context)
+                            isLoadingVideos = true
+                            cameraVideos = refreshCameraVideos(context)
+                            isLoadingVideos = false
                         }
+                    } else {
+                        isLoadingVideos = false
                     }
                 }
 
@@ -149,7 +180,9 @@ class MainActivity : ComponentActivity() {
                             Manifest.permission.READ_MEDIA_VIDEO
                         ) == PackageManager.PERMISSION_GRANTED
                     ) {
-                        cameraVideoDates = refreshCameraVideos(context)
+                        isLoadingVideos = true
+                        cameraVideos = refreshCameraVideos(context)
+                        isLoadingVideos = false
                     } else {
                         permissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO)
                     }
@@ -165,7 +198,8 @@ class MainActivity : ComponentActivity() {
                                 ) == PackageManager.PERMISSION_GRANTED
                             ) {
                                 coroutineScope.launch {
-                                    cameraVideoDates = refreshCameraVideos(context)
+                                    cameraVideos = refreshCameraVideos(context)
+                                    isLoadingVideos = false
                                 }
                             }
                         }
@@ -179,8 +213,11 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     CalendarScreen(
                         studiedDays = studiedDays,
-                        cameraVideoDates = cameraVideoDates,
+                        studyVideoDates = studyVideoDates,
+                        studyVideoIds = studyVideoIds,
                         dayDescriptions = dayDescriptions,
+                        cameraVideos = cameraVideos,
+                        isLoadingVideos = isLoadingVideos,
                         onToggleDay = { date ->
                             coroutineScope.launch {
                                 context.dataStore.edit { preferences ->
@@ -190,6 +227,18 @@ class MainActivity : ComponentActivity() {
                                         current - dateStr
                                     } else {
                                         current + dateStr
+                                    }
+                                }
+                            }
+                        },
+                        onToggleStudyVideo = { videoId, isStudy ->
+                            coroutineScope.launch {
+                                context.dataStore.edit { preferences ->
+                                    val current = preferences[STUDY_VIDEO_IDS_KEY] ?: emptySet()
+                                    preferences[STUDY_VIDEO_IDS_KEY] = if (isStudy) {
+                                        current + videoId
+                                    } else {
+                                        current - videoId
                                     }
                                 }
                             }
@@ -243,29 +292,18 @@ private fun jsonToMap(jsonStr: String?): Map<String, String> {
     return map
 }
 
-private suspend fun refreshCameraVideos(context: Context): Set<String> {
+private suspend fun refreshCameraVideos(context: Context): List<CameraVideo> {
     if (ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.READ_MEDIA_VIDEO
         ) != PackageManager.PERMISSION_GRANTED
     ) {
-        return emptySet()
+        return emptyList()
     }
 
-    val videos = withContext(Dispatchers.IO) {
+    return withContext(Dispatchers.IO) {
         getCameraVideos(context)
     }
-
-    val videoDates = videos.map { it.date.toString() }.toSet()
-
-    if (videoDates.isNotEmpty()) {
-        context.dataStore.edit { preferences ->
-            val current = preferences[STUDIED_DAYS_KEY] ?: emptySet()
-            preferences[STUDIED_DAYS_KEY] = current + videoDates
-        }
-    }
-
-    return videoDates
 }
 
 private fun getCameraVideos(context: Context): List<CameraVideo> {
@@ -349,9 +387,13 @@ private fun getCameraVideos(context: Context): List<CameraVideo> {
 @Composable
 fun CalendarScreen(
     studiedDays: Set<String>,
-    cameraVideoDates: Set<String>,
+    studyVideoDates: Set<String>,
+    studyVideoIds: Set<String>,
     dayDescriptions: Map<String, String>,
+    cameraVideos: List<CameraVideo>,
+    isLoadingVideos: Boolean,
     onToggleDay: (LocalDate) -> Unit,
+    onToggleStudyVideo: (String, Boolean) -> Unit,
     onSaveDescription: (LocalDate, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -451,8 +493,8 @@ fun CalendarScreen(
                 val date = currentMonth.atDay(day)
                 val dateStr = date.toString()
                 val isToday = (date == today)
-                val hasVideo = cameraVideoDates.contains(dateStr)
-                val isStudied = hasVideo || studiedDays.contains(dateStr)
+                val hasStudyVideo = studyVideoDates.contains(dateStr)
+                val isStudied = hasStudyVideo || studiedDays.contains(dateStr)
                 val hasDescription = dayDescriptions[dateStr]?.isNotBlank() == true
 
                 DayCell(
@@ -468,16 +510,23 @@ fun CalendarScreen(
 
     selectedDate?.let { date ->
         val dateStr = date.toString()
-        val hasVideo = cameraVideoDates.contains(dateStr)
+        val hasStudyVideo = studyVideoDates.contains(dateStr)
         val isStudiedSwitchOn = studiedDays.contains(dateStr)
         val description = dayDescriptions[dateStr] ?: ""
+        val dayVideos = remember(cameraVideos, date) {
+            cameraVideos.filter { it.date == date }
+        }
 
         DayDetailBottomSheet(
             date = date,
             isStudiedSwitchOn = isStudiedSwitchOn,
-            hasVideo = hasVideo,
+            hasStudyVideo = hasStudyVideo,
+            videos = dayVideos,
+            isLoadingVideos = isLoadingVideos,
+            studyVideoIds = studyVideoIds,
             description = description,
             onToggleStudied = onToggleDay,
+            onToggleStudyVideo = onToggleStudyVideo,
             onSaveDescription = onSaveDescription,
             onDismiss = { selectedDate = null }
         )
@@ -553,23 +602,16 @@ fun DayCell(
 fun DayDetailBottomSheet(
     date: LocalDate,
     isStudiedSwitchOn: Boolean,
-    hasVideo: Boolean,
+    hasStudyVideo: Boolean,
+    videos: List<CameraVideo>,
+    isLoadingVideos: Boolean,
+    studyVideoIds: Set<String>,
     description: String,
     onToggleStudied: (LocalDate) -> Unit,
+    onToggleStudyVideo: (String, Boolean) -> Unit,
     onSaveDescription: (LocalDate, String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    var videos by remember(date) { mutableStateOf<List<CameraVideo>>(emptyList()) }
-    var isLoadingVideos by remember(date) { mutableStateOf(true) }
-
-    LaunchedEffect(date) {
-        withContext(Dispatchers.IO) {
-            videos = getCameraVideos(context).filter { it.date == date }
-            isLoadingVideos = false
-        }
-    }
-
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -612,9 +654,9 @@ fun DayDetailBottomSheet(
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    if (hasVideo) {
+                    if (hasStudyVideo) {
                         Text(
-                            text = "Marked green (video recorded)",
+                            text = "Marked green (video counts as study)",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -663,7 +705,14 @@ fun DayDetailBottomSheet(
                 )
             } else {
                 videos.forEach { video ->
-                    VideoPlayerItem(video = video)
+                    val isStudy = studyVideoIds.contains(video.id.toString())
+                    VideoPlayerItem(
+                        video = video,
+                        isStudyVideo = isStudy,
+                        onToggleStudyVideo = { checked ->
+                            onToggleStudyVideo(video.id.toString(), checked)
+                        }
+                    )
                 }
             }
         }
@@ -673,6 +722,8 @@ fun DayDetailBottomSheet(
 @Composable
 fun VideoPlayerItem(
     video: CameraVideo,
+    isStudyVideo: Boolean,
+    onToggleStudyVideo: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -714,6 +765,24 @@ fun VideoPlayerItem(
                 .height(220.dp)
                 .clip(RoundedCornerShape(8.dp))
         )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Counts as study",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Switch(
+                checked = isStudyVideo,
+                onCheckedChange = onToggleStudyVideo
+            )
+        }
     }
 }
 
@@ -772,9 +841,13 @@ fun CalendarPreview() {
                 LocalDate.now().minusDays(1).toString(),
                 LocalDate.now().minusDays(3).toString()
             ),
-            cameraVideoDates = emptySet(),
+            studyVideoDates = emptySet(),
+            studyVideoIds = emptySet(),
             dayDescriptions = emptyMap(),
+            cameraVideos = emptyList(),
+            isLoadingVideos = false,
             onToggleDay = {},
+            onToggleStudyVideo = { _, _ -> },
             onSaveDescription = { _, _ -> }
         )
     }
@@ -789,9 +862,13 @@ fun CalendarDarkPreview() {
                 LocalDate.now().minusDays(1).toString(),
                 LocalDate.now().minusDays(3).toString()
             ),
-            cameraVideoDates = emptySet(),
+            studyVideoDates = emptySet(),
+            studyVideoIds = emptySet(),
             dayDescriptions = emptyMap(),
+            cameraVideos = emptyList(),
+            isLoadingVideos = false,
             onToggleDay = {},
+            onToggleStudyVideo = { _, _ -> },
             onSaveDescription = { _, _ -> }
         )
     }
